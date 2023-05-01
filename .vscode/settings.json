@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "*.old": "cpp",
+        "assets.h": "c"
+    }
+}
