@@ -1,16 +1,461 @@
 #include "main.h"
 
-void drawDigits(int digits){
-  // utility function for digital clock display: prints preceding colon and leading 0
-  u8g2.print(":");
-  if(digits < 10) {
-    u8g2.print("0");
+
+/*****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************
+ * 
+ * Time Sync Function
+ * 
+ *****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
+time_t syncProvider() {
+  return rtc.now().unixtime();
+}
+
+/*****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************
+ * 
+ * Setup function
+ * 
+ *****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
+void setup() {
+  uint8_t i;
+  Serial.begin(9600); // for debugging
+  Alarm.delay(2000);
+
+  Wire.begin();
+
+  /* Sanity check */
+  if (!rtc.begin(&Wire)) {
+    Serial.println("No RTC");
+    Serial.flush();
+    abort();
+  } else if (!rtc.isrunning()) {
+    Serial.println("RST RTC");
+    Serial.flush();
+    rtc.adjust(DateTime(__DATE__, __TIME__));
   }
-  Serial.print(digits);
-  u8g2.print(digits, DEC);
+
+  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // comment out after use and reupload
+  setPlants(4); // set amount of plants
+  setPotSize(0, 4); // set pot size
+  setPotSize(1, 4); // set pot size
+  setPotSize(2, 4); // set pot size
+  setPotSize(3, 4); // set pot size
+  setLitersPumpedPerMinute(1); // set liters pumped per minute
+
+  setSyncProvider(syncProvider);  //sets Time Library to RTC time
+  setSyncInterval(5000);          //sync Time Library to RTC every 5 seconds
+
+
+  if (timeStatus() != timeSet) {
+    Serial.println("No RTC Sync");
+  } else {
+    Serial.println("RTC Sync");
+  }
+
+  // declare relay as output
+  for (i = 0; i < sizeof(relays); i++) {
+    pinMode(relays[i], OUTPUT);  
+  }
+  // declare pump as output
+  pinMode(pump, OUTPUT);
+  // declare switch as input
+  pinMode(button, INPUT);
+  
+  // u8g.firstPage();
+  // do {
+  //   draw_elecrow();
+  // } while (u8g.nextPage());
+
+  // Alarm.alarmRepeat(dowMonday, 14, 30, 00, pumpWater);  // 14:30:00 every Sunday
+  // Alarm.alarmRepeat(dowWednesday, 14, 30, 00, pumpWater);  // 14:30:00 every Thesday
+  // Alarm.alarmRepeat(dowFriday, 14, 30, 00, pumpWater);  // 14:30:00 every Thursday
+  // // Test
+  // Alarm.alarmRepeat(dowWednesday, 01, 49, 00, pumpWater);  // 14:30:00 every Thursday
+
+  for ( i = 0; i < MAX_ALARMS; i++) {
+    // Alarm.alarmRepeat(dowWednesday, 01, 49, 00, pumpWater);
+  }
+
+  serialCommands.SetDefaultHandler(&cmdUnrecognized);
+  serialCommands.AddCommand(&cmdSetTimeAndDate_);
+  serialCommands.AddCommand(&cmdGetSetAlarms_);
+  serialCommands.AddCommand(&cmdReboot_);
+  serialCommands.AddCommand(&cmdHelp_);
+  serialCommands.AddCommand(&cmdTestPump_);
+  serialCommands.AddCommand(&cmdSoilMoistureSensorData_);
+
+  u8g2.begin();
 }
 
 
+// char * paddZero(uint8_t number, uint8_t padd = 2) {
+//   char * stringBuffer = (char *)malloc(sizeof(char) * padd);
+//   if(sprintf(stringBuffer, "%2d", number) > 0) {
+//     return stringBuffer;
+//   }
+// }
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************
+ * 
+ * Loop function
+ * 
+ *****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
+void loop() {
+  uint8_t plants = getPlants();
+  /* Process incoming commands. */
+  serialCommands.ReadSerial();
+  u8g2.firstPage();
+  do {
+    int button_state = digitalRead(button);
+    if (button_state == 1) {
+      // drawflower();
+      drawTH(plants);
+    } else {
+      drawTime();
+      printInfo();
+    }
+  } while (u8g2.nextPage());
+}
+
+void printInfo() {
+  uint8_t plants = getPlants();
+  uint8_t litersPerMinute = getLitersPerMinute();
+  uint16_t ccPerMinutePerPlant = ((litersPerMinute * 1000) / plants);
+  uint8_t potSize = getPotSize(0);
+
+  Serial.print("PT: ");
+  Serial.println(plants, DEC);
+  Serial.print("PL: ");
+  Serial.println(litersPerMinute, DEC);
+  Serial.print("PLP: ");
+  Serial.print(ccPerMinutePerPlant, DEC);
+  Serial.print("cc");
+  Serial.print("PS: ");
+  Serial.println(potSize, DEC);
+  Serial.print("RAM: ");
+  Serial.println(freeRam());
+}
+
+/*****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************
+ * 
+ * Battery Ram Getters
+ * 
+ *****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
+uint8_t getLitersPerMinute() {
+  return (rtc.readnvram(PUMP_LITERS_PER_MINUTE_ADDRESS));
+};
+
+uint8_t getPlants() {
+  return rtc.readnvram(PLANTS_ADDRESS);
+};
+
+uint8_t getPotSize(uint8_t pot) {
+  return rtc.readnvram(POTSIZE_ADDRESS[pot]);
+};
+
+SensorCalibration getSensortCalibrationData(uint8_t sensor) {
+  SensorCalibration sensorCalibration;
+  uint8_t size = 2;
+  sensorCalibration.min = rtc.readnvram(SENSOR_CALIBRATION_ADDRESS + (sensor * size));
+  sensorCalibration.max = rtc.readnvram(SENSOR_CALIBRATION_ADDRESS + (sensor * size) + 1);
+  return sensorCalibration;
+};
+
+uint8_t getActiveAlarm(uint8_t alarmNumber) {
+  uint8_t activeAlarms = rtc.readnvram(ALARM_GET_ACTIVE_ADDRESS);
+  return  bitRead(activeAlarms, alarmNumber);
+}
+
+Alarms * getAlarms() {
+  /* out counters */
+  uint8_t i = 0;
+  uint8_t j = 0;
+
+  /* alloc memory for the alarm struct */
+  struct Alarms *alarms = (Alarms *)malloc(sizeof(Alarms));
+  /* clear the newly allocated memory */
+  memset(alarms, 0, sizeof(Alarms));
+  /* Do we have memory */
+  if (alarms != NULL) {
+    for (i = ALARM_MODES_ADDRESS; i < ALARM_MODES_ADDRESS + (ALARM_DATA_STORE * MAX_ALARMS); i++) {
+      for (j = 0; j < ALARM_DATA_STORE ; j++) {
+        uint8_t startAddress =  i + j;
+        alarms->alarm[i][j] = rtc.readnvram(startAddress);
+      }
+    }
+  }
+  /* return the alarms pointer */
+  return alarms;
+}
+
+/*****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************
+ * 
+ * Battery Ram Setters
+ * 
+ *****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
+void setLitersPumpedPerMinute(uint8_t liters) {
+ rtc.writenvram(PUMP_LITERS_PER_MINUTE_ADDRESS, liters);
+};
+
+void setPlants(uint8_t number) {
+  rtc.writenvram(PLANTS_ADDRESS, number);
+};
+
+void setPotSize(uint8_t pot, uint8_t size) {
+  rtc.writenvram(POTSIZE_ADDRESS[pot], size);
+};
+
+void setSensorCalibrationValues(uint8_t sensor, uint8_t dry, uint8_t wet) {
+  uint8_t size = 2;
+  rtc.writenvram(SENSOR_CALIBRATION_ADDRESS + (sensor * size), dry);
+  rtc.writenvram(SENSOR_CALIBRATION_ADDRESS + (sensor * size) + 1, wet);
+};
+
+void setAlarmRepeat(uint8_t alarmNumber, timeDayOfWeek_t DOW, int H, int M, int S) {
+  rtc.writenvram((ALARM_MODES_ADDRESS * (ALARM_DATA_STORE + alarmNumber)) , DOW);
+  rtc.writenvram((ALARM_MODES_ADDRESS * (ALARM_DATA_STORE + alarmNumber) + 1), H);
+  rtc.writenvram((ALARM_MODES_ADDRESS * (ALARM_DATA_STORE + alarmNumber) + 2) , M);
+  rtc.writenvram((ALARM_MODES_ADDRESS * (ALARM_DATA_STORE + alarmNumber) + 3) , S);
+}
+
+/*****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************
+ * 
+ * Commands
+ * 
+ *****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
+
+void cmdUnrecognized(SerialCommands* sender, const char* cmd) {
+	sender->GetSerial()->print("ERR CMD:[");
+	sender->GetSerial()->print(cmd);
+	sender->GetSerial()->println("]");
+}
+
+void cmdHelp(SerialCommands* sender) {
+  sender->GetSerial()->println(HELP_MESSAGE);
+}
+
+void cmdTestPump(SerialCommands* sender) {
+  char* str = sender->Next();
+  // if no arguments then just print time
+	if (str == NULL) {
+    sender->GetSerial()->print("ARGS");
+		return;
+	}
+
+  sender->GetSerial()->print("TST PMP");
+  sender->GetSerial()->println(str);
+
+  uint8_t seconds = atoi(str);
+  testPump(seconds);
+  return;
+}
+
+void cmdGetTimeAndDate(SerialCommands* sender) {
+  char * timeStr = (char *) malloc(sizeof(char) * 64);
+  sprintf(timeStr, "%0d:%0d:%0d %s %0d %0d %0d", hour(), minute(), second(), printDow((timeDayOfWeek_t)weekday()), day(), month(), year());
+  sender->GetSerial()->println(timeStr); 
+  free(timeStr);
+}
+
+void cmdGetSetTimeAndDate(SerialCommands *sender) {
+	//Note: Every call to Next moves the pointer to next parameter
+
+	char* str = sender->Next();
+  // if no arguments then just print time
+	if (str == NULL) {
+		return cmdGetTimeAndDate(sender);
+	}
+
+  if (timeStatus() != timeNotSet) {
+    DateTime dateTime = DateTime(str);
+    if (dateTime.isValid()) {
+      rtc.adjust(dateTime);
+      sender->GetSerial()->println("TMA: ");
+      return cmdGetTimeAndDate(sender);
+    }
+  }
+}
+
+void cmdResetAlarms(SerialCommands *sender) {
+  uint8_t i = 0;
+  uint8_t j = 0;
+
+  for (i = ALARM_MODES_ADDRESS; i < ALARM_MODES_ADDRESS + (ALARM_DATA_STORE * MAX_ALARMS); i++) {
+    for (j = 0; j < ALARM_DATA_STORE ; j++) {
+      uint8_t startAddress =  i + j;
+      rtc.writenvram(startAddress , 0);
+    }
+  }
+}
+
+void cmdGetAlarms(SerialCommands *sender) {
+  struct Alarms *alarms = getAlarms();
+  if(alarms != NULL) {
+    printAlarms(sender);
+  }
+  free(alarms);
+}
+
+void cmdGetSetAlarms(SerialCommands *sender) {
+	char* nextArg = sender->Next();
+  // if no arguments then just print time
+	if (nextArg == NULL) {
+		// return cmdGetTimeAndDate(sender);
+    return printAlarms(sender);
+	}
+  do {
+    nextArg = sender->Next();
+    // uint8_t alarmNumber = atoi(nextArg); //converts string to int
+    // timeDayOfWeek_t dow = (timeDayOfWeek_t)atoi(sender->Next());
+    // char * str = (char *)malloc(sizeof(char) * 2);
+    // sprintf(str, "%0d", dow);
+    // sender->GetSerial()->print("DOW: ");
+    // sender->GetSerial()->print(str);
+    // sender->GetSerial()->print("\n");
+    Alarm.alarmRepeat(dowWednesday, 01, 49, 00, pumpWater);
+    // free(str);
+  } while (nextArg != NULL);
+
+}
+
+// void cmdGetActiveAlarms(SerialCommands *sender) {
+//   uint8_t i;
+//   sender->GetSerial()->println("ALARMS");
+//   for (i = 0; i < MAX_ALARMS; i++) {
+//     uint8_t isActive = getActiveAlarm(i);
+//     if (isActive > 0) {
+//       sender->GetSerial()->print("is active: ");
+//       sender->GetSerial()->println(i, DEC);
+//     }
+//   }
+// }
+
+void setActiveAlarms(uint8_t alarmNumber) {
+  uint8_t activeAlarms = rtc.readnvram(ALARM_GET_ACTIVE_ADDRESS);
+  bitSet(activeAlarms, alarmNumber);
+  return rtc.writenvram(ALARM_GET_ACTIVE_ADDRESS, activeAlarms);
+}
+
+void cmdToggleActiveAlarms(SerialCommands *sender) {
+  char* str = sender->Next();
+	if (str == NULL) {
+		sender->GetSerial()->println("ERROR NO_PORT");
+		return;
+	}
+  uint8_t alarm = atoi(str); //converts string to int
+  toggleActiveAlarms(alarm);
+}
+
+void toggleActiveAlarms(uint8_t alarmNumber) {
+  uint8_t activeAlarms = rtc.readnvram(ALARM_GET_ACTIVE_ADDRESS);
+  uint8_t isActive = bitRead(activeAlarms, alarmNumber);
+  if (isActive) {
+    bitClear(activeAlarms, alarmNumber);
+  } else { 
+    bitSet(activeAlarms, alarmNumber);
+  }
+  return rtc.writenvram(ALARM_GET_ACTIVE_ADDRESS, activeAlarms);
+}
+
+void cmdSetActiveAlarms(SerialCommands *sender) {
+  char* str = sender->Next();
+	if (str == NULL) {
+		sender->GetSerial()->println("ERROR NO ARGS");
+		return;
+	}
+  uint8_t alarm = atoi(str); // converts string to int
+  setActiveAlarms(alarm);
+}
+
+void cmdGetAlarms2(SerialCommands *sender) {
+  Stream * serial = sender->GetSerial();
+  uint8_t i;
+  Alarms * alarms = getAlarms();
+
+  for(i = 0; i < MAX_ALARMS; i++) {
+    // serial->print(alarms->alarm);
+    char * str = (char *)malloc(sizeof(char) * 10);
+    if(sprintf(str, "%d:%0d:%0d:%0d:%0d", alarms->alarm[i][0], alarms->alarm[i][1], alarms->alarm[i][2], alarms->alarm[i][3], alarms->alarm[i][4])) {
+      serial->println(str);
+    }
+  }
+}
+
+void cmdReboot(SerialCommands *sender) {
+  return reboot();
+}
+
+
+/* 
+ *****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************
+ * 
+ * Raw Functions Code
+ * 
+ *****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
+
+/* Hard Reboot */
+void reboot() {
+  wdt_disable();
+  wdt_enable(WDTO_15MS);
+  while (1) {}
+}
+
+/*
+ * Pump tester use it to test how much water 
+ * the pump can deliver in a given amount of seconds 
+ * Recommendation: purge the water lines first
+ */
+void testPump(uint8_t delay = 60) {
+  time_t currentTime = now(), orgTime = now(); // store the current time in time variable t
+  
+  digitalWrite(pump, HIGH);
+  while(currentTime < orgTime + delay) {
+    Alarm.delay(1000);
+    u8g2.firstPage();
+    u8g2.setFont(u8g_font_7x14);
+    do {
+      char * stringBuffer = (char *)malloc(sizeof(char) * 64);
+      sprintf(stringBuffer, "p: %02lu s", currentTime - orgTime);
+      u8g2.setCursor(10, 10);
+      u8g2.println(stringBuffer);
+      free(stringBuffer);
+    } while (u8g2.nextPage());
+    currentTime = now(); // store the current time in time variable t
+  }
+  digitalWrite(pump, LOW);
+}
+
+/*
+ * Displays time
+ */
 void drawTime(void) {
   uint8_t x = 5;
   u8g2.setFont(u8g_font_7x14);
@@ -34,15 +479,6 @@ void drawTime(void) {
   }
 }
 
-time_t syncProvider() {
-  return rtc.now().unixtime();
-}
-
-void draw_elecrow(void) {
-  // u8g.drawXBMP(32, 0, 64, 64, bitmap_logo);
-}
-
-
 void drawflower() {
   uint8_t i;
   uint8_t plants = getPlants();
@@ -57,104 +493,6 @@ void drawflower() {
   }
 }
 
-/*
- * Setup function
-*/
-void setup() {
-  uint8_t i;
-  Serial.begin(9600); // for debugging
-  Alarm.delay(2000);
-
-  Wire.begin();
-
-  /* Sanity check */
-  if (!rtc.begin(&Wire)) {
-    Serial.println("Couldn't find RTC");
-    Serial.flush();
-    abort();
-  } else if (!rtc.isrunning()) {
-    Serial.println("RTC is not running resetting");
-    Serial.flush();
-    rtc.adjust(DateTime(__DATE__, __TIME__));
-    abort();
-  }
-
-  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // comment out after use and reupload
-  setPlants(4); // set amount of plants
-  setPotSize(0, 4); // set pot size
-  setPotSize(1, 4); // set pot size
-  setPotSize(2, 4); // set pot size
-  setPotSize(3, 4); // set pot size
-  setLitersPumpedPerMinute(1); // set liters pumped per minute
-
-  setSyncProvider(syncProvider);  //sets Time Library to RTC time
-  setSyncInterval(5000);          //sync Time Library to RTC every 5 seconds
-
-
-  if (timeStatus() != timeSet) {
-    Serial.println("Unable to sync with the RTC");
-  } else {
-    Serial.println("RTC has set the system time");
-  }
-
-  // declare relay as output
-  for (i = 0; i < sizeof(relays); i++) {
-    pinMode(relays[i], OUTPUT);  
-  }
-  // declare pump as output
-  pinMode(pump, OUTPUT);
-  // declare switch as input
-  pinMode(button, INPUT);
-  // water_flower();
-  Alarm.delay(2000); // Pause for 2 seconds
-  
-  // u8g.firstPage();
-  // do {
-  //   draw_elecrow();
-  // } while (u8g.nextPage());
-
-  Alarms *alarms = getAlarms();
-  for (i = 0; i < MAX_ALARMS; i++) {
-    boolean isActive = getActiveAlarm(i);
-    if (isActive) {
-        Serial.print("Alarm: [");
-        Serial.print(i, DEC);
-        Serial.println("] is active !");
-        Serial.print("DOW:");
-        Serial.print(printDow((timeDayOfWeek_t)alarms->alarm[i][0]));
-        Serial.print("T:");
-        Serial.print(alarms->alarm[i][1], DEC);
-        Serial.print(":");
-        Serial.print(alarms->alarm[i][2], DEC);
-        Serial.print(":");
-        Serial.print(alarms->alarm[i][3], DEC);
-        Serial.print("\n");
-    }
-  }
-
-  // Alarm.alarmRepeat(dowMonday, 14, 30, 00, pumpWater);  // 14:30:00 every Sunday
-  // Alarm.alarmRepeat(dowWednesday, 14, 30, 00, pumpWater);  // 14:30:00 every Thesday
-  // Alarm.alarmRepeat(dowFriday, 14, 30, 00, pumpWater);  // 14:30:00 every Thursday
-  // // Test
-  // Alarm.alarmRepeat(dowWednesday, 01, 49, 00, pumpWater);  // 14:30:00 every Thursday
-
-  serialCommands.SetDefaultHandler(&cmdUnrecognized);
-  serialCommands.AddCommand(&cmdSetTimeAndDate_);
-  serialCommands.AddCommand(&cmdGetAlarms_);
-  serialCommands.AddCommand(&cmdResetAlarms_);
-  serialCommands.AddCommand(&cmdReboot_);
-  serialCommands.AddCommand(&cmdHelp_);
-  serialCommands.AddCommand(&cmdTestPump_);
-  serialCommands.AddCommand(&cmdGetActiveAlarm_);
-  serialCommands.AddCommand(&cmdGetActiveAlarms_);
-  serialCommands.AddCommand(&cmdSetActiveAlarms_);
-  serialCommands.AddCommand(&cmdToggleActiveAlarms_);
-
-  u8g2.begin();
-
-
-  // pumpWater();
-}
 
 char * printDow(timeDayOfWeek_t dow) {
   switch(dow) {
@@ -177,26 +515,6 @@ char * printDow(timeDayOfWeek_t dow) {
   }
 }
 
-void testPump(uint32_t delay = 60) {
-  time_t currentTime = now(), orgTime = now(); // store the current time in time variable t
-  
-  digitalWrite(pump, HIGH);
-  while(currentTime < orgTime + delay) {
-    Alarm.delay(1000);
-    u8g2.firstPage();
-    u8g2.setFont(u8g_font_7x14);
-    do {
-      char * stringBuffer = (char *)malloc(sizeof(char) * 64);
-      sprintf(stringBuffer, "pumping time: %02lu seconds", currentTime - orgTime);
-      u8g2.setCursor(10, 10);
-      u8g2.println(stringBuffer);
-      free(stringBuffer);
-    } while (u8g2.nextPage());
-    currentTime = now(); // store the current time in time variable t
-  }
-  digitalWrite(pump, LOW);
-}
-
 // functions to be called when an alarm triggers:
 void pumpWater() {
   uint8_t i;
@@ -213,9 +531,9 @@ void pumpWater() {
       u8g2.setFont(u8g_font_7x14);
       char * stringBuffer = (char *)malloc(sizeof(char) * 64);
       do {
-        sprintf(stringBuffer, "plant: %d time: %02lu seconds", i, currentTime - orgTime);
+        sprintf(stringBuffer, "p: %d t: %02lu s", i, currentTime - orgTime);
         u8g2.setCursor(10, 10);
-        u8g2.println("Watering");
+        u8g2.println("w");
         u8g2.setCursor(10, 20);
         u8g2.println(stringBuffer);
         free(stringBuffer);
@@ -266,45 +584,16 @@ void pumpWater2() {
   Serial.println("Alarm: - end");
 }
 
-// char * paddZero(uint8_t number, uint8_t padd = 2) {
-//   char * stringBuffer = (char *)malloc(sizeof(char) * padd);
-//   if(sprintf(stringBuffer, "%2d", number) > 0) {
-//     return stringBuffer;
-//   }
-// }
 
-
-void loop() {
-  uint8_t plants = getPlants();
-  uint8_t litersPumpedPerMinutePerPlant = getLitersPumpedPerMinutePerPlant(plants);
-  uint8_t potSize = getPotSize(0);
-  // water_flower(plants);
-  /* Process incoming commands. */
-  serialCommands.ReadSerial();
- 
-  u8g2.firstPage();
-  do {
-    int button_state = digitalRead(button);
-    if (button_state == 1) {
-      drawflower();
-      drawTH(plants);
-    } else {
-      // testPump();
-      drawTime();
-      Serial.print("plants: ");
-      Serial.println(plants, DEC);
-      Serial.print("litersPumpedPerMinutePerPlant: ");
-      Serial.println(litersPumpedPerMinutePerPlant, DEC);
-      Serial.print("potSize: ");
-      Serial.println(potSize, DEC);
-      Serial.print("free ram: ");
-      Serial.println(freeRam());
-    }
-  } while (u8g2.nextPage());
-}
-
-// v
-//Set moisture value
+/*****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************
+ * 
+ * Sensor reading
+ * 
+ *****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
 struct MoiustureSensorData readMoistureSensors() {
   /************These is for capacity moisture sensor*********/
   struct MoiustureSensorData sensor;
@@ -327,7 +616,7 @@ struct MoiustureSensorData readMoistureSensors() {
   return sensor;
 }
 
-void water_flower(uint8_t plants) {
+void waterFlower(uint8_t plants) {
   uint8_t i;
   MoiustureSensorData sensorData = readMoistureSensors();
   for( i = 0; i < plants; i++) {
@@ -415,328 +704,54 @@ void drawTH(uint8_t plants) {
 }
 
 
-/*
- * Battery Ram setters
- */
-uint8_t getLitersPerMinute() {
-  return (rtc.readnvram(PUMP_LITERS_PER_MINUTE_ADDRESS));
-};
-
-uint8_t getLitersPumpedPerMinutePerPlant(uint8_t relays) {
-  return (rtc.readnvram(PUMP_LITERS_PER_MINUTE_ADDRESS) / relays);
-};
-
-uint8_t getPlants() {
-  return rtc.readnvram(PLANTS_ADDRESS);
-};
-
-uint8_t getPotSize(uint8_t pot) {
-  return rtc.readnvram(POTSIZE_ADDRESS[pot]);
-};
-
-SensorCalibration getSensortCalibrationData(uint8_t sensor) {
-  SensorCalibration sensorCalibration;
-  uint8_t size = 2;
-  sensorCalibration.min = rtc.readnvram(SENSOR_CALIBRATION_ADDRESS + (sensor * size));
-  sensorCalibration.max = rtc.readnvram(SENSOR_CALIBRATION_ADDRESS + (sensor * size) + 1);
-  return sensorCalibration;
-};
-
-
-SensorCalibration *getSensortCalibrationData2(uint8_t sensor) {
-  uint8_t size = 2;
-  struct SensorCalibration *sensorCalibration = (SensorCalibration *)malloc(sizeof(SensorCalibration));
-  /* clear the newly allocated memory */
-  memset(sensorCalibration, 0, sizeof(SensorCalibration));
-  /* Do we have memory */
-  if (sensorCalibration != NULL) {
-    sensorCalibration->min = rtc.readnvram(SENSOR_CALIBRATION_ADDRESS + (sensor * size));
-    sensorCalibration->max = rtc.readnvram(SENSOR_CALIBRATION_ADDRESS + (sensor * size) + 1);
-  }
-  return sensorCalibration;
-};
-
-/*
- * Battery Ram Setters
- */
-void setLitersPumpedPerMinute(uint8_t liters) {
- rtc.writenvram(PUMP_LITERS_PER_MINUTE_ADDRESS, liters);
-};
-
-void setPlants(uint8_t number) {
-  rtc.writenvram(PLANTS_ADDRESS, number);
-};
-
-void setPotSize(uint8_t pot, uint8_t size) {
-  rtc.writenvram(POTSIZE_ADDRESS[pot], size);
-};
-
-void setAlarmRepeat(uint8_t alarmNumber, timeDayOfWeek_t DOW, int H, int M, int S) {
-  rtc.writenvram((ALARM_MODES_ADDRESS * (ALARM_DATA_STORE + alarmNumber)) , DOW);
-  rtc.writenvram((ALARM_MODES_ADDRESS * (ALARM_DATA_STORE + alarmNumber) + 1), H);
-  rtc.writenvram((ALARM_MODES_ADDRESS * (ALARM_DATA_STORE + alarmNumber) + 2) , M);
-  rtc.writenvram((ALARM_MODES_ADDRESS * (ALARM_DATA_STORE + alarmNumber) + 3) , S);
-}
-
-
-void cdmHelp(SerialCommands *sender) {
-  sender->GetSerial()->println("some help");
-}
-
-void printDigits(int digits) {
-  // utility function for digital clock display: prints preceding colon and leading 0
-  Serial.print(":");
-  if(digits < 10)
-    Serial.print('0');
-  Serial.print(digits);
-}
-
-// void cmdGetAlarm(SerialCommands *sender) {
-//   getAlarms(sender);
+// char * printCsvValues(SerialCommands *sender, char separator, float value, ...) {
+//   uint8_t i = 0;
+//   char * result = (char *)malloc(sizeof(char) * 256);
+//   //Declare a va_list macro and initialize it with va_start
+//   va_list arguments;
+//   va_start(arguments, value);
+//   while(value != -1) {
+//     sender->GetSerial()->print(value, DEC);
+//     sender->GetSerial()->print(";");
+//     value = va_arg(arguments, double);   // using '...' promotes float to double
+//   }
+//   va_end(arguments);
+//   sender->GetSerial()->print("\n");
 // }
 
-void cmdReboot(SerialCommands *sender) {
-  return reboot();
-}
-
-void cmdUnrecognized(SerialCommands* sender, const char* cmd) {
-	sender->GetSerial()->print("ERROR: Unrecognized command [");
-	sender->GetSerial()->print(cmd);
-	sender->GetSerial()->println("]");
-}
-
-/*
- * expects one single parameter
- * Commands
- */
-
-void cmdHelp(SerialCommands* sender) {
-  sender->GetSerial()->println(HELP_MESSAGE);
-}
-
-void cmdTestPump(SerialCommands* sender) {
-  char* str = sender->Next();
-  // if no arguments then just print time
-	if (str == NULL) {
-    sender->GetSerial()->print("ERR_ARGS");
-		return;
-	}
-
-  sender->GetSerial()->print("Testing pump for ");
-  sender->GetSerial()->print(str);
-  sender->GetSerial()->println(" seconds");
-
-  uint8_t seconds = atoi(str);
-  testPump(seconds);
-  return;
-}
-
-void cmdGetTimeAndDate(SerialCommands* sender) {
-  sender->GetSerial()->print(hour());
-  printDigits(minute());
-  printDigits(second());
-  sender->GetSerial()->print(" ");
-  sender->GetSerial()->print(day());
-  sender->GetSerial()->print(" ");
-  sender->GetSerial()->print(month());
-  sender->GetSerial()->print(" ");
-  sender->GetSerial()->print(year()); 
-  sender->GetSerial()->println(); 
-}
-
-void cmdSetTimeAndDate(SerialCommands *sender) {
-	//Note: Every call to Next moves the pointer to next parameter
-
-	char* str = sender->Next();
-  // if no arguments then just print time
-	if (str == NULL) {
-		return cmdGetTimeAndDate(sender);
-	}
-
-  sender->GetSerial()->print("Adjusting time to: ");
-  sender->GetSerial()->println(str);
-
-  if (timeStatus() != timeNotSet) {
-    // char * time = (char *)malloc(sizeof(char) * 10);
-    // if (sprintf(time, "T:%02d:%02d:%02d", hour(), minute(), second())) {
-    //   sender->GetSerial()->println(time);
-    // }
-    // rtc.adjust
-    DateTime dateTime = DateTime(str);
-    if (dateTime.isValid()) {
-      rtc.adjust(dateTime);
-      sender->GetSerial()->println("time adjusted to: ");
-      return cmdGetTimeAndDate(sender);
-    }
+void printAlarms(SerialCommands *sender) {
+  uint8_t i;
+  Alarms *alarms = getAlarms();
+  sender->GetSerial()->println("a;x;d;h;m;s");
+  for (i = 0; i < MAX_ALARMS; i++) {
+    boolean isActive = getActiveAlarm(i);
+    // printCsvValues(sender, ';', i, alarms->alarm[i][0], isActive, alarms->alarm[i][1], alarms->alarm[i][2], alarms->alarm[i][3], DEC);
+    sender->GetSerial()->print(i, DEC);
+    sender->GetSerial()->print(";");
+    sender->GetSerial()->print(isActive, DEC);
+    sender->GetSerial()->print(";");
+    sender->GetSerial()->print(alarms->alarm[i][0], DEC);
+    sender->GetSerial()->print(";");
+    sender->GetSerial()->print(alarms->alarm[i][1], DEC);
+    sender->GetSerial()->print(";");
+    sender->GetSerial()->print(alarms->alarm[i][2], DEC);
+    sender->GetSerial()->print(";");
+    sender->GetSerial()->print(alarms->alarm[i][3], DEC);
+    sender->GetSerial()->print("\n");
   }
-}
-
-void cmdResetAlarms(SerialCommands *sender) {
-  resetAlarms();
-  cmdGetAlarms(sender);
-}
-
-void printAlarm(SerialCommands *sender, Alarms *alarms, uint8_t index) {
-  sender->GetSerial()->print("DOW:");
-  sender->GetSerial()->print(alarms->alarm[index][0], DEC);
-  sender->GetSerial()->print("T:");
-  sender->GetSerial()->print(alarms->alarm[index][1], DEC);
-  sender->GetSerial()->print(":");
-  sender->GetSerial()->print(alarms->alarm[index][2], DEC);
-  sender->GetSerial()->print(":");
-  sender->GetSerial()->print(alarms->alarm[index][3], DEC);
   sender->GetSerial()->print("\n");
-}
-
-void cmdGetAlarms(SerialCommands *sender) {
-  uint8_t i = 0;
-  struct Alarms *alarms = getAlarms();
-
-  if(alarms != NULL) {
-    for (i = 0; i < MAX_ALARMS; i++) {
-      printAlarm(sender, alarms, i);
-    }
-  }
   free(alarms);
 }
 
-
-uint8_t getActiveAlarm(uint8_t alarmNumber) {
-  uint8_t activeAlarms = rtc.readnvram(ALARM_GET_ACTIVE_ADDRESS);
-  return  bitRead(activeAlarms, alarmNumber);
-}
-
-void cmdGetActiveAlarms(SerialCommands *sender) {
+void getSoilMoistureSensorData(SerialCommands *sender) {
   uint8_t i;
-  sender->GetSerial()->println("ALARMS");
-  for (i = 0; i < MAX_ALARMS; i++) {
-    uint8_t isActive = getActiveAlarm(i);
-    if (isActive > 0) {
-      sender->GetSerial()->print("is active: ");
-      sender->GetSerial()->println(i, DEC);
-    }
-  }
-}
-
-
-void cmdGetActiveAlarm(SerialCommands *sender) {
-  char* str = sender->Next();
-	if (str == NULL) {
-		sender->GetSerial()->println("ERROR ALARM");
-		return;
-	}
-  uint8_t alarm = atoi(str); //converts string to int
-  sender->GetSerial()->print("ALARM: ");
-  sender->GetSerial()->println(alarm, DEC);
-  uint8_t isActive = getActiveAlarm(alarm);
-  if (isActive > 0) {
-    sender->GetSerial()->print("is active: ");
-    sender->GetSerial()->print(alarm, DEC);
-  }
-}
-
-void setActiveAlarms(uint8_t alarmNumber) {
-  uint8_t activeAlarms = rtc.readnvram(ALARM_GET_ACTIVE_ADDRESS);
-  bitSet(activeAlarms, alarmNumber);
-  return rtc.writenvram(ALARM_GET_ACTIVE_ADDRESS, activeAlarms);
-}
-
-void cmdToggleActiveAlarms(SerialCommands *sender) {
-  char* str = sender->Next();
-	if (str == NULL) {
-		sender->GetSerial()->println("ERROR NO_PORT");
-		return;
-	}
-  uint8_t alarm = atoi(str); //converts string to int
-  toggleActiveAlarms(alarm);
-}
-
-void toggleActiveAlarms(uint8_t alarmNumber) {
-  uint8_t activeAlarms = rtc.readnvram(ALARM_GET_ACTIVE_ADDRESS);
-  uint8_t isActive = bitRead(activeAlarms, alarmNumber);
-  if (isActive) {
-    bitClear(activeAlarms, alarmNumber);
-  } else { 
-    bitSet(activeAlarms, alarmNumber);
-  }
-  return rtc.writenvram(ALARM_GET_ACTIVE_ADDRESS, activeAlarms);
-}
-
-
-void cmdSetActiveAlarms(SerialCommands *sender) {
-  char* str = sender->Next();
-	if (str == NULL) {
-		sender->GetSerial()->println("ERROR NO ARGS");
-		return;
-	}
-  uint8_t alarm = atoi(str); // converts string to int
-  setActiveAlarms(alarm);
-}
-
-
-Alarms * getAlarms() {
-  /* out counters */
-  uint8_t i = 0;
-  uint8_t j = 0;
-
-  /* alloc memory for the alarm struct */
-  struct Alarms *alarms = (Alarms *)malloc(sizeof(Alarms));
-  /* clear the newly allocated memory */
-  memset(alarms, 0, sizeof(Alarms));
-  /* Do we have memory */
-  if (alarms != NULL) {
-    for (i = ALARM_MODES_ADDRESS; i < ALARM_MODES_ADDRESS + (ALARM_DATA_STORE * MAX_ALARMS); i++) {
-      for (j = 0; j < ALARM_DATA_STORE ; j++) {
-        uint8_t startAddress =  i + j;
-        alarms->alarm[i][j] = rtc.readnvram(startAddress);
-      }
-    }
-  }
-  /* return the alarms pointer */
-  return alarms;
-}
-
-void resetAlarms() {
-  uint8_t i = 0;
-  uint8_t j = 0;
-
-  for (i = ALARM_MODES_ADDRESS; i < ALARM_MODES_ADDRESS + (ALARM_DATA_STORE * MAX_ALARMS); i++) {
-    for (j = 0; j < ALARM_DATA_STORE ; j++) {
-      uint8_t startAddress =  i + j;
-      rtc.writenvram(startAddress , 0);
-    }
-  }
-}
-
-void setAlarms(Alarms *alarms) {
-  uint8_t i = 0;
-  uint8_t j = 0;
-
-  for (i = ALARM_MODES_ADDRESS; i < ALARM_MODES_ADDRESS + (ALARM_DATA_STORE * MAX_ALARMS); i++) {
-    for (j = 0; j < ALARM_DATA_STORE ; j++) {
-      uint8_t startAddress =  i + j;
-      rtc.writenvram(startAddress , 0);
-    }
-  }
-}
-
-void reboot() {
-  wdt_disable();
-  wdt_enable(WDTO_15MS);
-  while (1) {}
-}
-
-
-void cmdGetAlarms2(SerialCommands *sender) {
-  Stream * serial = sender->GetSerial();
-  uint8_t i;
-  Alarms * alarms = getAlarms();
-
-  for(i = 0; i < MAX_ALARMS; i++) {
-    // serial->print(alarms->alarm);
-    char * str = (char *)malloc(sizeof(char) * 10);
-    if(sprintf(str, "%d:%0d:%0d:%0d:%0d", alarms->alarm[i][0], alarms->alarm[i][1], alarms->alarm[i][2], alarms->alarm[i][3], alarms->alarm[i][4])) {
-      serial->println(str);
-    }
+  uint8_t plants = getPlants();
+  MoiustureSensorData sensor = readMoistureSensors();
+  sender->GetSerial()->println("p;m");
+  for (i = 0; i < plants; i++) {
+    sender->GetSerial()->print(i, DEC);
+    sender->GetSerial()->print(";");
+    sender->GetSerial()->print(sensor.data[i], DEC);
+    sender->GetSerial()->print("\n");
   }
 }
